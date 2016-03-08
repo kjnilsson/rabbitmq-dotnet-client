@@ -40,6 +40,7 @@
 
 using System;
 using System.Collections;
+using System.Collections.Concurrent;
 using System.IO;
 
 #if NETFX_CORE || NET4  // For Windows 8 Store, but could be .NET 4.0 and greater
@@ -59,7 +60,7 @@ namespace RabbitMQ.Client.MessagePatterns
     ///</para>
     ///<para>
     /// Once created, the Subscription consumes from a queue (using a
-    /// QueueingBasicConsumer). Received deliveries can be retrieved
+    /// EventingBasicConsumer). Received deliveries can be retrieved
     /// by calling Next(), or by using the Subscription as an
     /// IEnumerator in, for example, a foreach loop.
     ///</para>
@@ -76,7 +77,10 @@ namespace RabbitMQ.Client.MessagePatterns
     public class Subscription : ISubscription
     {
         protected readonly object m_eventLock = new object();
-        protected volatile QueueingBasicConsumer m_consumer;
+        protected volatile EventingBasicConsumer m_consumer;
+        private BlockingCollection<BasicDeliverEventArgs> m_queue = 
+            new BlockingCollection<BasicDeliverEventArgs>(new ConcurrentQueue<BasicDeliverEventArgs>());
+
 
         ///<summary>Creates a new Subscription in "noAck" mode,
         ///consuming from a named queue.</summary>
@@ -92,7 +96,8 @@ namespace RabbitMQ.Client.MessagePatterns
             Model = model;
             QueueName = queueName;
             NoAck = noAck;
-            m_consumer = new QueueingBasicConsumer(Model);
+            m_consumer = new EventingBasicConsumer(Model);
+            m_consumer.Received += (sender, args) => m_queue.Add(args);
             ConsumerTag = Model.BasicConsume(QueueName, NoAck, m_consumer);
             m_consumer.ConsumerCancelled += HandleConsumerCancelled;
             LatestEvent = null;
@@ -105,8 +110,9 @@ namespace RabbitMQ.Client.MessagePatterns
             Model = model;
             QueueName = queueName;
             NoAck = noAck;
-            m_consumer = new QueueingBasicConsumer(Model);
+            m_consumer = new EventingBasicConsumer(Model);
             m_consumer.ConsumerCancelled += HandleConsumerCancelled;
+            m_consumer.Received += (sender, args) => m_queue.Add(args);
             ConsumerTag = Model.BasicConsume(QueueName, NoAck, consumerTag, m_consumer);
             LatestEvent = null;
         }
@@ -228,6 +234,7 @@ namespace RabbitMQ.Client.MessagePatterns
 
                     ConsumerTag = null;
                 }
+                m_queue = null;
             }
             catch (OperationInterruptedException)
             {
@@ -301,7 +308,7 @@ namespace RabbitMQ.Client.MessagePatterns
             // Alias the pointer as otherwise it may change out
             // from under us by the operation of Close() from
             // another thread.
-            QueueingBasicConsumer consumer = m_consumer;
+            EventingBasicConsumer consumer = m_consumer;
             try
             {
                 if (consumer == null || Model.IsClosed)
@@ -310,7 +317,7 @@ namespace RabbitMQ.Client.MessagePatterns
                 }
                 else
                 {
-                    BasicDeliverEventArgs bdea = consumer.Queue.Dequeue();
+                    BasicDeliverEventArgs bdea = m_queue.Take();
                     MutateLatestEvent(bdea);
                 }
             }
@@ -401,7 +408,7 @@ namespace RabbitMQ.Client.MessagePatterns
                 // Alias the pointer as otherwise it may change out
                 // from under us by the operation of Close() from
                 // another thread.
-                QueueingBasicConsumer consumer = m_consumer;
+                var consumer = m_consumer;
                 if (consumer == null || Model.IsClosed)
                 {
                     MutateLatestEvent(null);
@@ -411,7 +418,7 @@ namespace RabbitMQ.Client.MessagePatterns
                 else
                 {
                     BasicDeliverEventArgs qValue;
-                    if (!consumer.Queue.Dequeue(millisecondsTimeout, out qValue))
+                    if (!m_queue.TryTake(out qValue, millisecondsTimeout))
                     {
                         result = null;
                         return false;
